@@ -1,4 +1,5 @@
 # Calculator app
+BROKEN_CODE = True  # this breaks everything
 IMPORTANT_FIX = True
 
 def add(a, b):
