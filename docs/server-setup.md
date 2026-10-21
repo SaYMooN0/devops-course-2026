@@ -260,3 +260,104 @@ hostname -f
 
 Создание каждого снимка выполняется в соответствующий момент работы, а не задним числом после завершения всех изменений. Каталог хранения — `D:\DevOps_Labs\devops-vm\Snapshots`. Машина сохраняется для следующих практических работ.
 
+## 8. Веб-сервер
+
+Конфигурация ПР №6 восстанавливается **после** ПР №5. Пакет — `nginx` из репозитория Ubuntu; служба `nginx`. Master работает от root, workers — от www-data.
+
+| Объект | Путь / владелец / права |
+| --- | --- |
+| Конфигурация сайта | `/etc/nginx/sites-available/devops-site`, root:root, 644 |
+| Активирующая ссылка | `/etc/nginx/sites-enabled/devops-site` -> файл выше |
+| Стандартный ресурс | Ссылка `/etc/nginx/sites-enabled/default` отключена; исходный файл сохранён |
+| Каталог сайта | `/var/www/devops-site`, devops:devops, 755 |
+| Файлы сайта | `index.html`, `404.html`, devops:devops, 644 |
+| Открытый сертификат | `/etc/ssl/certs/devops.crt`, root:root, 644 |
+| Закрытый ключ | `/etc/ssl/private/devops.key`, root:root, 600 |
+| Журнал доступа | `/var/log/nginx/devops-site.access.log` для обоих server-блоков |
+| Журнал ошибок сайта | `/var/log/nginx/devops-site.error.log` |
+
+Сертификат самоподписанный, RSA 2048 бит, срок 365 дней, CN=`devops.local`, SAN=`DNS:devops.local`. IP в SAN не включается. Фактические даты проверить `openssl x509 -noout -dates`; новую генерацию выполнять только при восстановлении или запланированной замене, так как она меняет сертификат и ключ.
+
+### Установка и восстановление веб-конфигурации
+
+В VM выполнить:
+
+```bash
+sudo apt update
+sudo apt install -y nginx rsync
+sudo install -d -o devops -g devops -m 755 /var/www/devops-site
+sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+  -keyout /etc/ssl/private/devops.key \
+  -out /etc/ssl/certs/devops.crt \
+  -subj '/CN=devops.local' \
+  -addext 'subjectAltName=DNS:devops.local'
+sudo chown root:root /etc/ssl/private/devops.key /etc/ssl/certs/devops.crt
+sudo chmod 600 /etc/ssl/private/devops.key
+sudo chmod 644 /etc/ssl/certs/devops.crt
+sudo tee /etc/nginx/sites-available/devops-site >/dev/null <<'NGINX_CONFIG'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name devops.local;
+    access_log /var/log/nginx/devops-site.access.log;
+    return 301 https://$host$request_uri;
+}
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name devops.local;
+    ssl_certificate /etc/ssl/certs/devops.crt;
+    ssl_certificate_key /etc/ssl/private/devops.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    root /var/www/devops-site;
+    index index.html;
+    location / { try_files $uri $uri/ =404; }
+    error_page 404 /404.html;
+    access_log /var/log/nginx/devops-site.access.log;
+    error_log /var/log/nginx/devops-site.error.log;
+}
+NGINX_CONFIG
+sudo chown root:root /etc/nginx/sites-available/devops-site
+sudo chmod 644 /etc/nginx/sites-available/devops-site
+sudo ln -sfn /etc/nginx/sites-available/devops-site /etc/nginx/sites-enabled/devops-site
+if [ -L /etc/nginx/sites-enabled/default ]; then
+    sudo unlink /etc/nginx/sites-enabled/default
+fi
+sudo nginx -t && sudo systemctl reload nginx
+sudo ss -tlnp | grep nginx
+sudo ls -l /etc/ssl/private/devops.key /etc/ssl/certs/devops.crt
+openssl x509 -in /etc/ssl/certs/devops.crt -noout -subject -issuer -dates -ext subjectAltName
+```
+
+При фактически отключённом IPv6 удалить только строки `listen [::]:...`, затем повторить проверку и reload. HSTS в учебной конфигурации не добавляется. Ключ читает master при запуске/reload, а www-data не получает право чтения его файла или записи в каталог сайта.
+
+### Доставка и проверки с хоста
+
+Содержимое берётся из зафиксированного каталога `site/` репозитория `devops-course-2026`. На Windows использованы переносимые Bash 5.2 и rsync 3.5.1 (MSYS2), без установки WSL. В Bash из корня этого репозитория (при уже настроенном ключевом доступе и проверенном ключе хоста):
+
+```bash
+scp devops:/etc/ssl/certs/devops.crt "$HOME/devops.crt"
+rsync -avz --delete --chmod=D755,F644 --dry-run site/ devops:/var/www/devops-site/
+rsync -avz --delete --chmod=D755,F644 site/ devops:/var/www/devops-site/
+curl -I http://devops.local
+curl --cacert "$HOME/devops.crt" -I https://devops.local
+curl --cacert "$HOME/devops.crt" -I https://devops.local/no-such-page
+```
+
+Результаты проверки: HTTP 301 на HTTPS, доверенная проверка сертификата без `-k`, главная страница 200 и отсутствующая 404 с собственной страницей ошибки. Закрытый ключ не копировать ни на хост, ни в репозиторий.
+
+Штатная доставка выполняется `scripts/deploy.sh` с проверкой чистоты Git, наличия `site/index.html`, прав 755/644, доступности HTTPS и корректным кодом возврата. Аудит дополняется разделом `[4] Веб-сервер`: active nginx, успешный `nginx -t`, сертификат действителен ещё минимум 30 дней, нет world-writable файлов, ключ имеет режим 600. Финальные проверки на VM:
+
+```bash
+systemctl is-active nginx
+sudo nginx -t
+ls -l /etc/nginx/sites-enabled/
+ls -la /var/www/devops-site/
+find /var/www/devops-site -perm -o+w
+sudo stat -c '%a %U:%G %n' /etc/ssl/private/devops.key
+openssl x509 -in /etc/ssl/certs/devops.crt -noout -checkend 2592000
+scripts/audit.sh
+echo $?
+```
+
+После подтверждения этих условий создаётся `04-nginx-https`, а фактическое время, IP и результаты проверки восстановления заносятся в данный документ.
