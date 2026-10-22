@@ -364,12 +364,70 @@ echo $?
 
 На Windows chmod не представил режим 666 для локального файла: после rsync без --chmod серверный файл сохранил 644. Небезопасный режим 666 задан отдельно в VM для воспроизводимого опыта с www-data; штатный деплой восстановил 644 и исходное содержимое. В штатном сценарии --checksum обнаруживает и исправляет подмену даже при совпадении размера и времени файла.
 
-## 9. Проверка сценария доставки
+## 9. Контейнеризация
+
+Docker Engine 29.9.2 установлен из официального репозитория download.docker.com; Compose v5.6.1. В группе docker — devops (уже имеет sudo); членство предоставляет полномочия уровня root. Исходники находятся в app/ репозитория devops-course-2026, проект на VM — /home/devops/app. Используется Python 3.12 slim, Flask 3.0.3, psycopg2-binary 2.9.9, Gunicorn 22.0.0. Процесс приложения работает с UID 999 (app), CMD записан в exec-форме.
+
+### Доставка и секрет
+
+На хосте из корня репозитория (первый раз назначение проверено: каталог отсутствовал):
+
+```bash
+rsync -avz --delete --exclude=.env --dry-run app/ devops:app/
+rsync -avz --delete --exclude=.env app/ devops:app/
+```
+
+Для последующей доставки без удаления лишних файлов допустим rsync без --delete; .env всё равно исключён. app/.env.example хранит только заглушку. Реальный /home/devops/app/.env создаётся на VM и не копируется на хост. Его владелец devops:devops, режим 600; переменные POSTGRES_DB=app, POSTGRES_USER=app, DB_HOST=db и случайный POSTGRES_PASSWORD. Секрет не выводить в отчёт, docker compose config или полный docker inspect.
+
+```bash
+cd ~/app
+umask 077
+cp .env.example .env                 # только если .env ещё не существует
+chmod 600 .env
+sed -i "s/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+docker compose up -d --build --wait
+```
+
+### Сеть и хранение
+
+Compose создаёт bridge-сеть app_backend. Имя db разрешается встроенным DNS в адрес контейнера PostgreSQL. Порт приложения опубликован как 127.0.0.1:5000:5000, PostgreSQL 5432 не опубликован. У db настроен pg_isready; app зависит от service_healthy. Данные PostgreSQL 16 хранятся в именованном томе app_db_data, /var/lib/postgresql/data. Оба сервиса имеют restart: unless-stopped.
+
+```bash
+cd ~/app
+docker compose ps
+docker compose exec -T app id
+docker compose exec -T app getent hosts db
+docker compose port app 5000
+sudo ss -tlnp | grep -E ':(5000|5432)\b'
+curl -fsS http://127.0.0.1:5000/
+```
+
+down сохраняет том; down -v удаляет его. Опыт удаления выполнен только с тестовым томом этой работы после pg_dump в ~/pr7-before-volume-reset.sql. В дальнейшей работе том и проект сохранять.
+
+### Обратный прокси
+
+В существующем HTTPS-блоке /etc/nginx/sites-available/devops-site добавлено только расположение /app/. Статический location / сохранён. После nginx -t выполнен reload.
+
+```nginx
+location /app/ {
+    proxy_pass http://127.0.0.1:5000/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+Завершающий / заменяет префикс /app/ на /: /app/health становится /health. С хоста curl --cacert ~/devops.crt https://devops.local/app/ возвращает счётчик; /app/health — ok; статический / — 200. Остановка app приводит к 502 и connect() failed (111: Connection refused) while connecting to upstream в журнале /var/log/nginx/devops-site.error.log. После docker compose start app ресурс восстанавливается.
+
+Раздел [5] scripts/audit.sh проверяет активность Docker, healthy PostgreSQL, безопасную публикацию 5000/5432 и права .env 600. Временная публикация 5000:5000 должна дать exit 1; после возврата 127.0.0.1:5000:5000 — exit 0. Основные правила UFW не меняются: публикация Docker на 0.0.0.0 обходит входящие правила UFW. Снимок 05-docker-compose сохраняет готовый проект.
+
+## 10. Проверка сценария доставки
 
 Пробный запуск из docs/ завершился кодом 0 и не изменил SHA-256 страницы сервера. Доставка зафиксированного изменения завершилась 0. Незакоммиченный index.html и отсутствующий в коммите index.html дали 1 без синхронизации. При остановленном Nginx rsync доставил файл, но HTTPS-проверка дала 1; служба восстановлена. Финальная доставка и аудит завершились 0.
 
 Сценарий использует одно SSH-соединение rsync, BatchMode=yes, ConnectTimeout=5 и проверку сертификата через --cacert. Ключ сервера подтверждён отпечатком; публичный сертификат скопирован по SSH в ~/devops.crt. В отдельном браузерном контексте использована привязка доверия к точному SPKI этого сертификата, системное хранилище сертификатов не изменялось.
 
-## 10. Подготовка Docker Engine
+## 11. Подготовка Docker Engine
 
 Docker Engine установлен из https://download.docker.com/linux/ubuntu (noble/stable), пакеты docker-ce, docker-ce-cli, containerd.io, docker-buildx-plugin, docker-compose-plugin. Службы docker и containerd включены. Пользователь devops добавлен в docker; hello-world запускается в новой пользовательской сессии. Группа docker предоставляет права, эквивалентные root.

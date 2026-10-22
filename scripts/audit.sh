@@ -86,5 +86,30 @@ if [[ "$WEB_MODE" == yes || ( "$WEB_MODE" == auto && -e "$NGINX_CONFIG" ) ]]; th
     fi
 fi
 
+
+if [[ "$WEB_MODE" != no && -f /home/devops/app/docker-compose.yml ]]; then
+    echo '[5] Контейнеризация'
+    APP_DIR=/home/devops/app
+    DOCKER_ACTIVE="$(systemctl is-active docker 2>/dev/null)" || DOCKER_ACTIVE=unknown
+    check 'Служба docker активна' active "$DOCKER_ACTIVE"
+    APP_DB_ID="$(priv docker compose --project-directory "$APP_DIR" ps -q db 2>/dev/null)" || APP_DB_ID=''
+    APP_DB_HEALTH=unavailable
+    if [[ -n "$APP_DB_ID" ]]; then
+        APP_DB_HEALTH="$(priv docker inspect -f '{{.State.Health.Status}}' "$APP_DB_ID" 2>/dev/null)" || APP_DB_HEALTH=unavailable
+    fi
+    check 'Контейнер PostgreSQL находится в состоянии healthy' healthy "$APP_DB_HEALTH"
+    APP_BIND="$(priv docker compose --project-directory "$APP_DIR" port app 5000 2>/dev/null)" || APP_BIND=unavailable
+    APP_DB_BIND="$(priv docker compose --project-directory "$APP_DIR" port db 5432 2>/dev/null)" || APP_DB_BIND=''
+    APP_SOCKETS="$(ss -H -ltn 2>/dev/null)" || APP_SOCKETS='unavailable'
+    APP_PORTS_OK=no
+    if [[ "$APP_BIND" == '127.0.0.1:5000' && ( -z "$APP_DB_BIND" || "$APP_DB_BIND" == ':0' ) && "$APP_SOCKETS" != unavailable ]] &&
+       awk '$4 ~ /:(5000|5432)$/ && $4 !~ /^127[.]0[.]0[.]1:/ {bad=1} END {exit bad}' <<< "$APP_SOCKETS"; then
+        APP_PORTS_OK=yes
+    fi
+    check 'Порт 5000 только на 127.0.0.1 и порт 5432 не опубликован' yes "$APP_PORTS_OK"
+    APP_ENV_MODE="$(priv stat -c '%a' "$APP_DIR/.env" 2>/dev/null)" || APP_ENV_MODE=unavailable
+    check 'Права файла приложения .env равны 600' 600 "$APP_ENV_MODE"
+fi
+
 printf 'Пройдено: %s, не пройдено: %s\n' "$PASS" "$FAIL"
 if (( FAIL == 0 )); then exit 0; else exit 1; fi
