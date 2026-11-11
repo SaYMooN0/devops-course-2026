@@ -1,0 +1,6 @@
+---
+app_image: "ghcr.io/saymoon0/devops-ci-app"
+app_tag: "e42e49a0305aa123df6816f406473d1953af8828"
+app_container_name: "devops-ci-app"
+app_host_port: 5000
+app_internal_port: 5000
